@@ -1,3 +1,12 @@
+.. warning::
+
+   **Disclaimer:** This is a fork of `YoRyan/mailrise
+   <https://github.com/YoRyan/mailrise>`_. The changes made in this fork,
+   starting with version 2.0.0, were vibe coded: they were largely written by
+   an AI coding assistant. They are covered by automated tests, but review them
+   before relying on this fork in production. Please report problems with this
+   fork here, not to the upstream project.
+
 .. image:: https://raw.githubusercontent.com/YoRyan/mailrise/main/src/mailrise/asset/mailrise-logo.png
   :alt: Mailrise logo
 
