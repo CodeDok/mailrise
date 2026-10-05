@@ -2,6 +2,52 @@
 Changelog
 =========
 
+Version 2.0.0
+=============
+
+:Date: October 5, 2026
+
+Breaking changes:
+
+- Require Python 3.10+ and Apprise v2.0.1+ (up from Python 3.8 and Apprise v0.9.4)
+- Docker images are published only to the GitHub Container Registry, as
+  ``ghcr.io/codedok/mailrise``, not to Docker Hub
+- The Docker image runs as UID/GID 1000 (previously a system UID such as 999) and
+  installs Mailrise to /opt/venv
+- The configuration file is now read with YAML's safe loader, so Python-specific
+  tags such as ``!!python/object`` are rejected
+
+Security:
+
+- FIX: Failed SMTP logins received no reply, leaving clients hanging (#101)
+- Compare passwords in constant time, and don't reveal whether a username exists
+- Lock out IP addresses after repeated failed logins (``smtp.auth.max_failures``,
+  ``smtp.auth.lockout_seconds``)
+- Warn at startup when SMTP authentication is enabled without TLS, and add
+  ``smtp.auth.require_tls`` to refuse to start instead (#161, #162)
+- Stop leaking router exception details to SMTP clients
+- Add ``smtp.data_size_limit`` and ``smtp.max_recipients`` (default 100)
+- Strip directory components and control characters from attachment filenames,
+  and keep attachment files in a private temporary directory
+- Escape control characters in logged email fields, so emails can't forge log lines
+- Docker: pick up Debian security updates at build time, remove pip from the
+  image, and make the installed code read-only for the container user (#170)
+- CI: test on Python 3.10–3.14, scan the Docker image with Trivy, and rebuild
+  images weekly
+
+Fixes and features:
+
+- Upgrade to Apprise v2, and log which services failed when a notification fails
+- FIX: Crash on HTML emails with inline images (multipart/related) (#135, #171)
+- FIX: Crash when a multipart message could not be parsed; it is now refused
+- FIX: Notification exceptions other than Apprise failures were reported as success
+- FIX: Notification type suffixes in upper case (``.FAILURE``) were sent as "info"
+- FIX: Building with recent setuptools failed with a bdist_wheel error (#160)
+- Add sender-based routing with ``configs.<sender>.<name>`` (#145, #157)
+- Allow periods in the username of config keys, such as ``first.last@example.com`` (#164)
+- Add ``PUID``, ``PGID``, and ``TZ`` Docker build arguments (#149)
+- Pass the authenticated username to custom routers as ``auth_data``
+
 Version 1.4.0
 =============
 

@@ -9,16 +9,13 @@ mailrise
 
 An SMTP gateway for Apprise notifications.
 
-.. |docker| image:: https://badgen.net/docker/pulls/yoryan/mailrise
-  :alt: Docker pulls
-
-.. |commit| image:: https://badgen.net/github/last-commit/yoryan/mailrise/main
+.. |commit| image:: https://badgen.net/github/last-commit/codedok/mailrise/main
   :alt: Last commit
 
-.. |checks| image:: https://badgen.net/github/checks/yoryan/mailrise
+.. |checks| image:: https://badgen.net/github/checks/codedok/mailrise
   :alt: Checks status
 
-|docker| |commit| |checks|
+|commit| |checks|
 
 Description
 ===========
@@ -89,10 +86,43 @@ Installation
 As a Docker container
 ---------------------
 
-An official Docker image is available
-`from Docker Hub <https://hub.docker.com/r/yoryan/mailrise>`_. To use it, you
+An official Docker image is available from the
+`GitHub Container Registry <https://github.com/CodeDok/mailrise/pkgs/container/mailrise>`_
+as ``ghcr.io/codedok/mailrise``. To use it, you
 must bind mount a configuration file to ``/etc/mailrise.conf``. This mount must
 be a *file*, not a directory, and it cannot override anything else in /etc.
+
+The container runs as the unprivileged user ``mailrise`` with UID and GID
+``1000``. To use different IDs, or a different default timezone, build the
+image yourself::
+
+    docker build --build-arg PUID=1234 --build-arg PGID=1234 --build-arg TZ=Europe/Berlin .
+
+The timezone can also be set at runtime with the ``TZ`` environment variable.
+
+Mailrise needs no privileges and no writable filesystem except a temporary
+directory for email attachments, so it is a good idea to lock the container
+down. A hardened docker-compose.yml:
+
+.. code-block:: yaml
+
+    services:
+      mailrise:
+        image: ghcr.io/codedok/mailrise
+        restart: unless-stopped
+        ports:
+          - "8025:8025"
+        volumes:
+          - ./mailrise.conf:/etc/mailrise.conf:ro
+        environment:
+          TZ: Europe/Berlin
+        read_only: true
+        tmpfs:
+          - /tmp:rw,noexec,nosuid,size=64m
+        cap_drop:
+          - ALL
+        security_opt:
+          - no-new-privileges:true
 
 Notes for NAS users
 ^^^^^^^^^^^^^^^^^^^
@@ -109,16 +139,16 @@ Mailrise with one:
   image's default command with something like ``-v /etc/myconfig/mailrise.conf``
   so you can passthrough the ``myconfig`` directory without interfering with the
   rest of the filesystem.
-* TrueNAS SCALE runs containers as root by default. This breaks Mailrise, which
-  is designed to run as a non-root container for enhanced security. Ensure the
-  container is running as user ``999`` and group ``999``.
+* TrueNAS SCALE runs containers as root by default. Mailrise is designed to run
+  as a non-root container for enhanced security. Ensure the container is running
+  as user ``1000`` and group ``1000``, or the IDs you built the image with.
 
 
 From PyPI
 ---------
 
 You can find Mailrise `on PyPI <https://pypi.org/project/mailrise/>`_. The
-minimum Python version is 3.8+.
+minimum Python version is 3.10+.
 
 Once installed, you should write a configuration file and then configure Mailrise
 to run as a service. Here is the suggested systemd unit file::
@@ -172,9 +202,10 @@ configs.<name>                         dictionary ``<name>`` denotes the email a
                                                   Please also note that the domain component still defaults to
                                                   ``mailrise.xyz``, so to match any username on any domain, use ``*@*``.
 
-                                                  Please note that the period character is reserved for sender flags, so it
-                                                  cannot be used in the username component of the address.
-                                                  ``bad.address`` is not okay, and neither is ``bad.address@mydomain.com``.
+                                                  Periods are allowed in the username component, such as
+                                                  ``first.last@mydomain.com``, but the username cannot end in one of the
+                                                  notification type suffixes ``.info``, ``.success``, ``.warning``, or
+                                                  ``.failure``, which are reserved for senders.
 
                                                   The dictionary value is the Apprise
                                                   `YAML configuration <https://github.com/caronc/apprise/wiki/config_yaml>`_
@@ -182,6 +213,21 @@ configs.<name>                         dictionary ``<name>`` denotes the email a
 
                                                   In addition to the Apprise configuration, some Mailrise-exclusive options
                                                   can be specified under this key. See the ``mailrise`` options below.
+
+                                                  Apprise's own ``${NAME}`` template variables (declared in a ``template``
+                                                  section and supplied with ``APPRISE_TEMPLATE_<NAME>`` environment
+                                                  variables) also work here, as an alternative to ``!env_var``.
+configs.<sender>.<name>                dictionary Routes by sender as well as by recipient. ``<sender>`` is matched against
+                                                  the address in the email's From header, and ``<name>`` against the
+                                                  recipient address, both exactly like ``configs.<name>`` above, except
+                                                  that the domain of ``<sender>`` defaults to ``*`` (any domain). Mailrise
+                                                  treats a configs entry as sender-scoped when it contains none of the
+                                                  Apprise configuration keys (``urls``, ``include``, ``asset``, ``tag``,
+                                                  ``template``, ``version``) or ``mailrise``.
+
+                                                  The From header is chosen by the sender and can be forged. Do not rely
+                                                  on sender routing for anything security sensitive, unless only trusted
+                                                  clients can reach Mailrise (see ``smtp.auth``).
 configs.<name>.mailrise.title_template string     The template string used to create notification titles. See "Template
                                                   strings" below.
 
@@ -229,7 +275,35 @@ smtp.auth.basic                        dictionary Enables basic authentication w
                                                   username, while the value is the password.
 
                                                   Note that credentials will be sent over plaintext unless some form of TLS
-                                                  is enabled.
+                                                  is enabled. Mailrise logs a warning at startup if that is the case.
+
+                                                  With the ``starttls`` mode, clients must issue STARTTLS before they can
+                                                  log in. Make sure your SMTP client is set to use STARTTLS, not plaintext
+                                                  or TLS on connect.
+smtp.auth.require_tls                  boolean    If true, refuse to start when basic authentication is enabled but TLS
+                                                  is off, instead of just logging a warning.
+
+                                                  Defaults to false.
+smtp.auth.max_failures                 number     The number of failed logins allowed from a single IP address within
+                                                  ``smtp.auth.lockout_seconds``. Once it is exceeded, all logins from that
+                                                  address are refused until the window expires. Set to 0 to disable.
+
+                                                  Behind a TCP proxy, such as the Traefik setup below, all clients share
+                                                  the proxy's address, so failed logins by one client can lock out the
+                                                  others.
+
+                                                  Defaults to 5.
+smtp.auth.lockout_seconds              number     The length of the failed login window, in seconds.
+
+                                                  Defaults to 300.
+smtp.data_size_limit                   number     The maximum size of an email message, in bytes. Set to 0 to disable.
+
+                                                  Defaults to 33554432 (32 MiB).
+smtp.max_recipients                    number     The maximum number of recipients per email. Each recipient can produce a
+                                                  notification, so this limits the notifications a single email can send.
+                                                  Set to 0 to disable.
+
+                                                  Defaults to 100.
 smtp.hostname                          string     Specifies the hostname used when responding to the EHLO command.
 
                                                   Defaults to the system FQDN.
@@ -334,6 +408,17 @@ underlying JSON structure, a useful aid.
           # container orchestrators like Kubernetes.
           - !env_var MY_SECRET_URL
 
+    # Sender-scoped configs route by the From address as well. This one
+    # catches all email from "nas@<any domain>" to "alerts@mailrise.xyz".
+    # Note that this example would have to come before the "*@*" catch-all
+    # above to have any effect, because the first match wins. The From header
+    # can be forged, so don't use this as a security boundary.
+    #
+    # "nas":
+    #   alerts:
+    #     urls:
+    #       - ntfy://ntfy.sh/my-nas-topic
+
     # Finally, you can enable TLS encryption and/or SMTP authentication if you
     # want them.
 
@@ -347,6 +432,14 @@ underlying JSON structure, a useful aid.
         basic:
           username: password
           AzureDiamond: hunter2
+        # Refuse to start if TLS is off. Lock out IP addresses after 5 failed
+        # logins within 5 minutes.
+        require_tls: true
+        max_failures: 5
+        lockout_seconds: 300
+      # Limit the size and fan-out of incoming emails.
+      data_size_limit: 33554432
+      max_recipients: 100
 
 Easy TLS with Traefik
 ---------------------
@@ -361,7 +454,7 @@ docker-compose.yml:
 .. code-block:: yaml
 
     mailrise:
-      image: yoryan/mailrise
+      image: ghcr.io/codedok/mailrise
       container_name: mailrise
       restart: unless-stopped
       volumes:
@@ -400,6 +493,9 @@ directive in your configuration file with the path to a Python source file.
 The router class, if provided, should be stored in a module-level variable named
 ``router``. The authenticator callback, if provided, should be stored in a
 module-level variable named ``authenticator``.
+
+When the built-in basic authentication is used, routers receive the
+authenticated username as ``auth_data``.
 
 For further details, refer to the
 `sample file used for testing

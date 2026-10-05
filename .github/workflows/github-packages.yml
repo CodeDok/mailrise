@@ -6,6 +6,9 @@ on:
       - 'main'
     tags:
       - '*'
+  # Rebuild weekly to pick up security fixes in the base image.
+  schedule:
+    - cron: '17 4 * * 1'
   workflow_dispatch:
 
 jobs:
@@ -17,7 +20,10 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
+        with:
+          # setuptools_scm derives the Mailrise version from the git tags.
+          fetch-depth: 0
       -
         name: Login to GitHub Container Registry
         uses: docker/login-action@v3 
@@ -29,4 +35,6 @@ jobs:
         name: Build and Push
         uses: ./.github/actions/docker-build
         with:
-          images: ghcr.io/YoRyan/mailrise
+          # GHCR image names must be lowercase. The package is linked to this
+          # repository through the org.opencontainers.image.source label.
+          images: ghcr.io/codedok/mailrise

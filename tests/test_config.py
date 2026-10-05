@@ -6,11 +6,12 @@ import logging
 from io import StringIO
 
 import pytest
+import yaml
 from apprise import Apprise, AppriseConfig, NotifyFormat
 from pytest import MonkeyPatch
 
 from mailrise.basic_authenticator import BasicAuthenticator
-from mailrise.config import load_config
+from mailrise.config import DEFAULT_DATA_SIZE_LIMIT, DEFAULT_MAX_RECIPIENTS, load_config
 from mailrise.simple_router import _Key, SimpleRouter
 
 
@@ -122,14 +123,17 @@ def test_mailrise_options() -> None:
 
 def test_config_keys() -> None:
     """Tests the config key parser with both string and full email formats."""
-    with pytest.raises(SystemExit):
-        file = StringIO("""
-            configs:
-              has.periods:
-                urls:
-                  - json://localhost
-        """)
-        load_config(_logger, file)
+    # Periods are allowed, except for the notification type suffixes.
+    for bad_key in ('has.failure', 'has.periods.info@example.com',
+                    'x.WARNING@example.com'):
+        with pytest.raises(SystemExit):
+            file = StringIO(f"""
+                configs:
+                  {bad_key}:
+                    urls:
+                      - json://localhost
+            """)
+            load_config(_logger, file)
     with pytest.raises(SystemExit):
         file = StringIO("""
             configs:
@@ -150,6 +154,17 @@ def test_config_keys() -> None:
     assert len(router.senders) == 1
     key = _Key(user='user', domain='example.com')
     assert router.get_sender(key) is not None
+
+    file = StringIO("""
+        configs:
+          has.periods:
+            urls:
+              - json://localhost
+    """)
+    mrise = load_config(_logger, file)
+    router = mrise.router
+    assert isinstance(router, SimpleRouter)
+    assert router.get_sender(_Key(user='has.periods')) is not None
 
 
 def test_fnmatch_config_keys() -> None:
@@ -246,13 +261,13 @@ def test_env_var() -> None:
             sender = router.get_sender(key)
             assert sender is not None
             notifier = _make_notifier(sender.config_yaml)
-            # Missing type annotation for this property as of Dec 2022.
-            ap_servers = notifier.servers  # type: ignore
-            assert len(ap_servers) == 1
-            config = ap_servers[0]
-            servers = config.servers()
-            assert len(servers) == 1
-            assert servers[0].url().startswith('json://localhost')
+            ap_configs = notifier.services
+            assert len(ap_configs) == 1
+            config = ap_configs[0]
+            assert isinstance(config, AppriseConfig)
+            services = config.services()
+            assert len(services) == 1
+            assert services[0].url().startswith('json://localhost')
 
     with pytest.raises(SystemExit):
         file = StringIO("""
@@ -262,6 +277,81 @@ def test_env_var() -> None:
                 - !env_var error
         """)
         load_config(_logger, file)
+
+
+def test_auth_require_tls() -> None:
+    """Tests that smtp.auth.require_tls refuses to start without TLS."""
+    yml = """
+        configs:
+          test:
+            urls:
+              - json://localhost
+        smtp:
+          auth:
+            basic:
+              username: password
+            require_tls: {require_tls}
+    """
+    mrise = load_config(_logger, StringIO(yml.format(require_tls='false')))
+    assert mrise.authenticator is not None
+    with pytest.raises(SystemExit):
+        load_config(_logger, StringIO(yml.format(require_tls='true')))
+
+
+def test_limits() -> None:
+    """Tests the SMTP and authentication limits."""
+    file = StringIO("""
+        configs:
+          test:
+            urls:
+              - json://localhost
+    """)
+    mrise = load_config(_logger, file)
+    assert mrise.data_size_limit == DEFAULT_DATA_SIZE_LIMIT
+    assert mrise.max_recipients == DEFAULT_MAX_RECIPIENTS
+
+    file = StringIO("""
+        configs:
+          test:
+            urls:
+              - json://localhost
+        smtp:
+          data_size_limit: 0
+          max_recipients: 5
+          auth:
+            basic:
+              username: password
+            max_failures: 10
+            lockout_seconds: 60
+    """)
+    mrise = load_config(_logger, file)
+    assert mrise.data_size_limit == 0
+    assert mrise.max_recipients == 5
+    assert isinstance(mrise.authenticator, BasicAuthenticator)
+    assert mrise.authenticator.max_failures == 10
+    assert mrise.authenticator.lockout_seconds == 60
+
+    for bad in ('max_recipients: -1', 'data_size_limit: lots', 'max_recipients: yes'):
+        with pytest.raises(SystemExit):
+            load_config(_logger, StringIO(f"""
+                configs:
+                  test:
+                    urls:
+                      - json://localhost
+                smtp:
+                  {bad}
+            """))
+
+
+def test_safe_loader() -> None:
+    """Tests that the configuration file cannot construct Python objects."""
+    with pytest.raises(yaml.constructor.ConstructorError):
+        load_config(_logger, StringIO("""
+            configs:
+              test:
+                urls:
+                  - !!python/object/apply:os.system ["true"]
+        """))
 
 
 def _make_notifier(config: str):

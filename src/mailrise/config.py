@@ -5,7 +5,6 @@ This is the YAML configuration parser for Mailrise.
 from __future__ import annotations
 
 import importlib.util
-import io
 import os
 import typing as typ
 from enum import Enum
@@ -21,8 +20,11 @@ from mailrise.router import Router
 from mailrise.simple_router import load_from_yaml as load_simple_router
 
 
-class ConfigFileLoader(yaml.FullLoader):  # pylint: disable=too-many-ancestors
-    """Our YAML loader class, which comes with an attached logger."""
+class ConfigFileLoader(yaml.SafeLoader):  # pylint: disable=too-many-ancestors
+    """Our YAML loader class, which comes with an attached logger.
+
+    It is based on the safe loader, so the configuration file cannot construct
+    arbitrary Python objects."""
     logger: Logger
 
     def __init__(self, stream, logger: Logger) -> None:
@@ -51,6 +53,12 @@ class ConfigFileLoader(yaml.FullLoader):  # pylint: disable=too-many-ancestors
         raise SystemExit(1)
 
 
+DEFAULT_DATA_SIZE_LIMIT = 33554432  # 32 MiB, aiosmtpd's default
+DEFAULT_MAX_RECIPIENTS = 100
+DEFAULT_AUTH_MAX_FAILURES = 5
+DEFAULT_AUTH_LOCKOUT_SECONDS = 300
+
+
 class TLSMode(Enum):
     """Specifies a TLS encryption operating mode."""
     OFF = 'no TLS'
@@ -70,9 +78,12 @@ class MailriseConfig(NamedTuple):
         tls_certfile: The path to the TLS certificate chain file.
         tls_keyfile: The path to the TLS key file.
         smtp_hostname: The advertised SMTP server hostname.
-        senders: A list of notification targets, each with a [key, sender]
-            tuple, where key contains username and domain patterns that can be
-            matched by fnmatch and sender is the Sender instance itself.
+        router: The router that converts emails into notifications.
+        authenticator: The SMTP authenticator, if authentication is enabled.
+        data_size_limit: The maximum size of an email message, in bytes. Zero
+            means unlimited.
+        max_recipients: The maximum number of recipients per email. Zero means
+            unlimited.
     """
     logger: Logger
     listen_host: str
@@ -83,6 +94,8 @@ class MailriseConfig(NamedTuple):
     smtp_hostname: typ.Optional[str]
     router: Router
     authenticator: typ.Optional[AuthenticatorType]
+    data_size_limit: int = DEFAULT_DATA_SIZE_LIMIT
+    max_recipients: int = DEFAULT_MAX_RECIPIENTS
 
 
 class MailriseImportedCode(NamedTuple):
@@ -98,7 +111,7 @@ class MailriseImportedCode(NamedTuple):
     authenticator: typ.Optional[AuthenticatorType] = None
 
 
-def load_config(logger: Logger, file: io.TextIOWrapper) -> MailriseConfig:
+def load_config(logger: Logger, file: typ.TextIO) -> MailriseConfig:
     """Loads configuration data from a YAML file.
 
     Args:
@@ -131,6 +144,13 @@ def load_config(logger: Logger, file: io.TextIOWrapper) -> MailriseConfig:
         raise SystemExit(1)
 
     yml_smtp = yml.get('smtp', {})
+    if not isinstance(yml_smtp, dict):
+        logger.critical('The smtp node is not a YAML mapping')
+        raise SystemExit(1)
+    yml_auth = yml_smtp.get('auth', {})
+    if not isinstance(yml_auth, dict):
+        logger.critical('The smtp.auth node is not a YAML mapping')
+        raise SystemExit(1)
 
     router = None
     authenticator = None
@@ -147,7 +167,16 @@ def load_config(logger: Logger, file: io.TextIOWrapper) -> MailriseConfig:
     if not router:
         router = load_simple_router(logger, yml.get('configs', {}))
     if not authenticator:
-        authenticator = _load_authenticator(yml_smtp.get('auth', {}))
+        authenticator = _load_authenticator(logger, yml_auth)
+
+    if authenticator is not None and tls_mode == TLSMode.OFF:
+        if yml_auth.get('require_tls', False):
+            logger.critical('SMTP authentication is enabled with smtp.auth.require_tls, '
+                            'but TLS is off')
+            raise SystemExit(1)
+        logger.warning('SMTP authentication is enabled, but TLS is off. Passwords will be '
+                       'sent in cleartext. Enable TLS, or set smtp.auth.require_tls to '
+                       'refuse to start in this configuration.')
 
     return MailriseConfig(
         logger=logger,
@@ -158,7 +187,13 @@ def load_config(logger: Logger, file: io.TextIOWrapper) -> MailriseConfig:
         tls_keyfile=tls_keyfile,
         smtp_hostname=yml_smtp.get('hostname', None),
         router=router,
-        authenticator=authenticator
+        authenticator=authenticator,
+        data_size_limit=_get_nonnegative_int(
+            logger, yml_smtp, 'smtp.data_size_limit', 'data_size_limit',
+            DEFAULT_DATA_SIZE_LIMIT),
+        max_recipients=_get_nonnegative_int(
+            logger, yml_smtp, 'smtp.max_recipients', 'max_recipients',
+            DEFAULT_MAX_RECIPIENTS)
     )
 
 
@@ -179,10 +214,30 @@ def _load_imported_code(logger: Logger, file_path: str) -> MailriseImportedCode:
     return typ.cast(MailriseImportedCode, module)
 
 
-def _load_authenticator(config: dict[str, typ.Any]) -> typ.Optional[AuthenticatorType]:
+def _load_authenticator(logger: Logger, config: dict[str, typ.Any]) \
+        -> typ.Optional[AuthenticatorType]:
     if 'basic' in config and isinstance(config['basic'], dict):
         logins = {str(username): str(password)
                   for username, password in config['basic'].items()}
-        return typ.cast(AuthenticatorType, BasicAuthenticator(logins=logins))
+        return typ.cast(AuthenticatorType, BasicAuthenticator(
+            logins=logins,
+            max_failures=_get_nonnegative_int(
+                logger, config, 'smtp.auth.max_failures', 'max_failures',
+                DEFAULT_AUTH_MAX_FAILURES),
+            lockout_seconds=_get_nonnegative_int(
+                logger, config, 'smtp.auth.lockout_seconds', 'lockout_seconds',
+                DEFAULT_AUTH_LOCKOUT_SECONDS),
+            logger=logger
+        ))
 
     return None
+
+
+def _get_nonnegative_int(logger: Logger, node: dict[str, typ.Any], name: str,
+                         key: str, default: int) -> int:
+    value = node.get(key, default)
+    # bool is a subclass of int, but "yes" is not a meaningful limit.
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        logger.critical('%s must be a non-negative integer, got: %r', name, value)
+        raise SystemExit(1)
+    return value
